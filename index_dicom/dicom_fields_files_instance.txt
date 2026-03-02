@@ -1,0 +1,13 @@
+ImageType
+SOPInstanceUID
+AccessionNumber
+Modality
+SliceThickness
+StudyInstanceUID
+SeriesInstanceUID
+StudyID
+SeriesNumber
+AcquisitionNumber
+InstanceNumber
+Rows
+Columns

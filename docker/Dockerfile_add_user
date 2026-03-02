@@ -1,0 +1,19 @@
+ARG BASE_IMAGE=rad-ext:latest
+# added default BASE_IMAGE to satisfy linter; it probably won't work but the wrapper script requires a value anyway
+FROM $BASE_IMAGE
+USER root
+
+# Add sudo command
+RUN apt update; apt install -y sudo
+
+# Create user
+ARG USER_ID
+ARG GROUP_ID
+ARG USER
+RUN addgroup --gid $GROUP_ID $USER && \
+    useradd --create-home --shell /bin/bash --uid $USER_ID --gid $GROUP_ID $USER && \
+    mkdir -p /etc/sudoers.d && \
+    echo "${USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${USER} && \
+    chmod 0440 /etc/sudoers.d/${USER}
+USER $USER
+WORKDIR /home/$USER

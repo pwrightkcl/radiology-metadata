@@ -1,0 +1,14 @@
+# Configuration file for query.py
+
+[pacs]
+ip = "192.168.1.100"  # IP address of the PACS server
+port = 8104  # Port number of the PACS server (note that ports below 1024 may require root privileges)
+aec = "PACS"  # Called Application Entity Title (PACS server)
+aet = "MYAPP"  # Calling Application Entity Title (querying node)
+
+[query]
+retry_limit = 10  # Number of times to retry after PACS association rejected when querying studies by date
+chunk_retry_limit = 3  # Retries when querying series or images by study UID, for chunks of study UIDs
+study_retry_limit = 10  # Retries when querying series or images by study UID, for single study UIDs
+retry_pause_seconds = 120  # Seconds to pause between retry attempts after timeouts or rejections
+overwrite = false  # Overwrite existing data; only applies when querying studies by date
