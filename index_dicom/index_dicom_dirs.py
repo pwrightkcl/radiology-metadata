@@ -11,7 +11,6 @@ import csv
 from math import floor, ceil
 import gc
 
-from nltk import chunk
 import pandas as pd
 import pydicom
 from pydicom.multival import MultiValue
