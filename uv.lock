@@ -398,6 +398,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pyarrow-stubs"
+version = "20.0.0.20251215"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyarrow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/30/16/ca991ada0416dc02c246e4b3c853f35053676eb704c63720ef24547d2d68/pyarrow_stubs-20.0.0.20251215.tar.gz", hash = "sha256:92c1fda4998f0c13e608d8abc7e4b8537e3ef108f6bf42c58e5af97e7d143e75", size = 236578, upload-time = "2025-12-15T06:47:46.187Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/7c/a467f91c6c3aa4c34d5a1dafca9ae4db01b757877577d6b0ae04908a0180/pyarrow_stubs-20.0.0.20251215-py3-none-any.whl", hash = "sha256:0634e70388cd23e7c78e2abbb1989822edc34df2d2ff4fd50a2316dd0cdafd9f", size = 235697, upload-time = "2025-12-15T06:47:44.643Z" },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.12.5"
 source = { registry = "https://pypi.org/simple" }
@@ -561,6 +573,7 @@ dependencies = [
     { name = "pandas-stubs" },
     { name = "pickleshare" },
     { name = "pyarrow" },
+    { name = "pyarrow-stubs" },
     { name = "pydantic-settings" },
     { name = "pydicom" },
     { name = "pynetdicom" },
@@ -578,6 +591,7 @@ requires-dist = [
     { name = "pandas-stubs", specifier = ">=2.3.3.260113" },
     { name = "pickleshare", specifier = ">=0.7.5" },
     { name = "pyarrow", specifier = ">=23.0.0" },
+    { name = "pyarrow-stubs", specifier = ">=20.0.0.20251215" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "pydicom", specifier = ">=3.0.1" },
     { name = "pynetdicom", specifier = ">=3.0.4" },
