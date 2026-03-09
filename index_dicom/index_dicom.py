@@ -13,11 +13,12 @@ from math import floor, ceil
 import gc
 from datetime import timedelta
 import warnings
+from typing import Any
 
 import pandas as pd
-from pydicom import dcmread, Dataset
+from pydicom import dcmread, Dataset, DataElement
 from pydicom.errors import InvalidDicomError
-from pydicom.datadict import keyword_for_tag, dictionary_VR, dictionary_VM, dictionary_has_tag
+from pydicom.datadict import dictionary_VR, dictionary_VM, dictionary_has_tag
 from pydicom.multival import MultiValue
 from pydicom.uid import UID
 from pydicom.valuerep import DSfloat, IS, PersonName
@@ -37,6 +38,12 @@ _default_keywords_file = _default_keywords_dir + [
 ]
 
 DEFAULT_KEYWORDS = {'dir': _default_keywords_dir, 'file': _default_keywords_file}
+STRING_VRS = {"AE", "AS", "CS", "DA", "DT", "LO", "LT", "PN", "SH", "ST", "TM", "UC", "UI", "UR", "UT"}
+DEFAULT_MAX_COLUMNS = 256
+
+
+class ColumnLimitExceededError(ValueError):
+    """Raised when flattened metadata exceeds configured DataFrame column limit."""
 
 class DicomIndexer():
     # level: str
@@ -46,17 +53,15 @@ class DicomIndexer():
     # dicom_attributes: list | None = None
 
     # Initialise by checking the variables are valid
-    def __init__(self, level: str, input_dir: str | Path, output_dir: str | Path, chunk_size: int | None = None, dicom_attributes: list | None = None, overwrite: bool = False):
+    def __init__(self, level: str, input_dir: str | Path, output_dir: str | Path, chunk_size: int | None = None, dicom_attributes: list | None = None, overwrite: bool = False, max_columns: int = DEFAULT_MAX_COLUMNS):
         self.level = level.lower()
         self.input_dir = Path(input_dir).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.chunk_size = chunk_size
+        self.dicom_attributes = dicom_attributes
         self.overwrite = overwrite
-        if dicom_attributes:
-            self.dicom_attributes = dicom_attributes
-        else:
-            # Make sure self.dicom_attributes is always a list, even if None or empty list is passed
-            self.dicom_attributes = []
+        self.max_columns = max_columns
+        self.seen_columns: set[str] = set()
 
          # Check level is valid
         if self.level not in ["file", "dir"]:
@@ -94,6 +99,7 @@ class DicomIndexer():
             print("Using default DICOM attributes.")
             self.attribute_list = DEFAULT_KEYWORDS[self.level]
         elif len(self.dicom_attributes) == 1:
+            # A single item could be a keyword, "*", or a file containing keywords. Check these possibilities in order.
             if dictionary_has_tag(self.dicom_attributes[0]):
                 self.attribute_list = self.dicom_attributes
             elif self.dicom_attributes[0] == "*":
@@ -111,7 +117,7 @@ class DicomIndexer():
             # A list of multiple items must be keywords
             self.attribute_list = self.dicom_attributes
                 
-        # Now self.dicom_attributes must be a list keywords or "*". If it's not "*", check all keywords are valid.
+        # Now self.dicom_attributes must be a list of keywords or "*". If it's not "*", check all keywords are valid.
         if self.attribute_list != ["*"]:
             for attr in self.attribute_list:
                 if not dictionary_has_tag(attr):
@@ -120,6 +126,10 @@ class DicomIndexer():
 
         if self.overwrite:
             print("Overwrite mode is ON: existing output files will be replaced.")
+
+        if not isinstance(self.max_columns, int) or self.max_columns <= 0:
+            raise ValueError("max_columns must be a positive integer.")
+        print(f"Maximum allowed columns in output table: {self.max_columns}.")
 
     def list_dcm_files(self, refresh: bool = False) -> list[Path]:
         """List DICOM ``.dcm`` files recursively and cache the result.
@@ -187,13 +197,16 @@ class DicomIndexer():
             if chunk_stem.with_suffix('.parquet').is_file():
                 dicom_index = pd.read_parquet(chunk_stem.with_suffix('.parquet'))
                 df_list.append(dicom_index)
+                self.update_seen_columns(dicom_index.columns, context=f"reading chunk {chunk}")
             elif chunk_stem.with_suffix('.pickle').is_file():
                 dicom_index = pd.read_pickle(chunk_stem.with_suffix('.pickle'))
                 df_list.append(dicom_index)
+                self.update_seen_columns(dicom_index.columns, context=f"reading chunk {chunk}")
             else:
                 missing_chunks.append(chunk)
         
         dicom_index = pd.concat(df_list, ignore_index=True)
+        self.validate_column_limit(dicom_index, context="concatenated chunks")
         # Will need save_tables method - placeholder for now
         # save_tables(dicom_index, self.output_dir / 'dicom_index')
         
@@ -206,7 +219,7 @@ class DicomIndexer():
     def dcm_to_tags(self, dicom_file: Path) -> dict:
         """Read a DICOM file and return a dictionary of DICOM attributes.
         
-        Adds meta-attributes for filepath. Handles errors.
+        Adds meta-attributes for filepath, warnings and errors.
         Will read only specified attributes if keywords provided, otherwise reads all.
 
         Parameters:
@@ -231,54 +244,160 @@ class DicomIndexer():
             this_data['error'] = str(e)
             return this_data
 
-        tag_warnings: list[str] = []
+        attribute_warnings: list[str] = []
         try:
-            if self.attribute_list == ["*"]:
-                tag_dict, tag_warnings = self.get_all_elements(ds)
-            else:
-                tag_dict, tag_warnings = self.get_named_elements(ds, self.attribute_list)
-            this_data.update(tag_dict)
+            attribute_dict, attribute_warnings = self.dataset_to_attributes(ds, keywords=self.attribute_list)
+            this_data.update(attribute_dict)
+            self.update_seen_columns(this_data.keys(), context=f"extracting {dicom_file}")
+        except ColumnLimitExceededError:
+            raise
         except Exception as e:
             this_data['error'] = f"Error processing DICOM metadata: {str(e)}"
 
         if read_warning:
-            if tag_warnings:
-                this_data['warnings'] = '\\n'.join([read_warning] + tag_warnings)
+            if attribute_warnings:
+                this_data['warnings'] = '\\n'.join([read_warning] + attribute_warnings)
             else:
                 this_data['warnings'] = read_warning
-        elif tag_warnings:
-            this_data['warnings'] = '\\n'.join(tag_warnings)
+        elif attribute_warnings:
+            this_data['warnings'] = '\\n'.join(attribute_warnings)
 
         return this_data
 
-    def get_named_elements(self, ds, keywords: list[str]) -> tuple[dict, list[str]]:
-        """Extract specified DICOM elements by keyword from a Dataset.
-        
-        TODO: Implement extraction logic based on query.py approach.
-        
-        Parameters:
-            ds: pydicom Dataset
-            keywords: List of DICOM keywords to extract
-            
-        Returns:
-            Tuple of (attribute_dict, warnings_list)
-        """
-        # Placeholder - to be implemented with query.py logic
-        return {}, []
+    def dataset_to_attributes(self, ds: Dataset, keywords: list[str], prefix: str = "") -> tuple[dict, list[str]]:
+        """Extract DICOM elements from a Dataset, flattening sequences recursively.
 
-    def get_all_elements(self, ds) -> tuple[dict, list[str]]:
-        """Extract all DICOM elements from a Dataset.
-        
-        TODO: Implement extraction logic based on query.py approach.
-        
-        Parameters:
-            ds: pydicom Dataset
-            
-        Returns:
-            Tuple of (attribute_dict, warnings_list)
+        If ``keywords`` is ["*"], all top-level elements except PixelData are included.
         """
-        # Placeholder - to be implemented with query.py logic
-        return {}, []
+        dicom_dict: dict[str, Any] = {}
+        warning_clips: list[str] = []
+        keys = keywords if keywords != ["*"] else [k for k in ds.keys() if k != (0x7FE0, 0x0010)]
+
+        for key in keys:
+            field_name = str(key)
+
+            if isinstance(key, str):
+                if key not in ds:
+                    dicom_dict[prefix + key] = None
+                    continue
+
+            with warnings.catch_warnings(record=True) as w:
+                el = ds[key]
+                if isinstance(key, str):
+                    _key = prefix + key
+                elif not el.is_private and el.keyword:
+                    _key = prefix + el.keyword
+                else:
+                    # Keep unknown/private tags as readable and ds[...] compatible hex keys.
+                    _key = prefix + f'0x{el.tag:08x}'
+                field_name = _key
+                if len(w) > 0:
+                    clip = str(w[0].message).split(':')[0]
+                    warning_clips.append(f"Loading {field_name}: {clip}")
+
+            if el.VR == 'SQ':
+                for i, sq_ds in enumerate(el.value):
+                    sq_prefix = f'{field_name}.{i}.'
+                    sq_dict, sq_warnings = self.dataset_to_attributes(sq_ds, keywords=["*"], prefix=sq_prefix)
+                    dicom_dict.update(sq_dict)
+                    warning_clips.extend(sq_warnings)
+            else:
+                with warnings.catch_warnings(record=True) as w:
+                    norm = self._normalise_vr(el)
+                    dicom_dict[field_name] = self._convert_value(norm)
+                    if len(w) > 0:
+                        clip = str(w[0].message).split(':')[0]
+                        warning_clips.append(f"Converting {field_name}: {clip}")
+
+        return dicom_dict, warning_clips
+
+    def _normalise_vr(self, el: DataElement) -> str | list | int | float | None:
+        """Normalise DataElement values by VR/VM to stabilise downstream table typing."""
+        value = el.value
+        vr = el.VR
+        tag = el.tag
+
+        my_null = "" if vr in STRING_VRS else None
+
+        vm = None
+        if dictionary_has_tag(tag):
+            vm = dictionary_VM(tag)
+
+        if isinstance(value, MultiValue):
+            value = list(value)
+        elif value == "" or value is None or pd.isna(value):
+            if vm == "1":
+                return my_null
+            return []
+
+        if vm != "1" and not isinstance(value, list):
+            if isinstance(value, str):
+                if '/' in value:
+                    return value.split('/')
+                if '\\' in value:
+                    return value.split('\\')
+                return [value]
+            return [value]
+        if vm == "1" and isinstance(value, list):
+            if len(value) == 0:
+                return my_null
+            if len(value) == 1:
+                if value[0] == "" or value[0] is None or pd.isna(value[0]):
+                    return my_null
+                return value[0]
+            return str(value)
+
+        return value
+
+    def _convert_value(self, v: Any) -> Any:
+        """Convert pydicom value to a serializable value."""
+        t = type(v)
+        if t is list:
+            return [self._convert_value(mv) for mv in v]
+        if pd.isna(v):
+            return None
+        if t in (int, float):
+            return v
+        if t is DSfloat:
+            return float(v) if str(v) != "" else None
+        if t is IS:
+            return int(v) if str(v) != "" else None
+        if t in (str, PersonName, UID):
+            cv = self._sanitise_unicode(str(v))
+            if len(cv) > 256:
+                cv = cv[:253] + '...'
+            return cv
+        if t is bytes:
+            s = v.decode('ascii', 'replace')
+            return self._sanitise_unicode(s)
+        return repr(v)
+
+    @staticmethod
+    def _sanitise_unicode(s: str) -> str:
+        return s.replace(u"\u0000", "").strip()
+
+    def validate_column_limit(self, dicom_index: pd.DataFrame, context: str = "") -> None:
+        """Raise if output table width exceeds configured max_columns."""
+        n_cols = len(dicom_index.columns)
+        if n_cols > self.max_columns:
+            context_msg = f" while {context}" if context else ""
+            raise ColumnLimitExceededError(
+                f"Column limit exceeded{context_msg}: {n_cols} columns generated, "
+                f"but max_columns is set to {self.max_columns}. "
+                "This is usually caused by flattening nested DICOM sequences; reduce selected attributes "
+                "or reduce sequence complexity."
+            )
+
+    def update_seen_columns(self, columns: Any, context: str = "") -> None:
+        """Track global union of seen columns and enforce max_columns early."""
+        self.seen_columns.update(str(c) for c in columns)
+        n_cols = len(self.seen_columns)
+        if n_cols > self.max_columns:
+            context_msg = f" while {context}" if context else ""
+            raise ColumnLimitExceededError(
+                f"Column limit exceeded{context_msg}: {n_cols} unique columns seen so far, "
+                f"but max_columns is set to {self.max_columns}."
+            )
 
     def save_tables(self, dicom_index, file_stem: Path) -> None:
         """Save the DICOM index as CSV and parquet file.
@@ -289,6 +408,7 @@ class DicomIndexer():
             dicom_index: DataFrame containing the DICOM index.
             file_stem: Path to the output file stem.
         """
+        self.validate_column_limit(dicom_index, context=f"saving {file_stem.name}")
         dicom_index.to_csv(file_stem.with_suffix('.csv'), index=False, quoting=csv.QUOTE_NONNUMERIC)
 
         # Sanitize columns for parquet compatibility
@@ -349,6 +469,7 @@ class DicomIndexer():
             print(f"Indexed {self.n_dcm} DICOM files in {(toc - tic):.0f} seconds.")
             
             dicom_index = pd.DataFrame(metadata)
+            self.validate_column_limit(dicom_index, context="non-chunked index")
             self.save_tables(dicom_index, self.output_dir / 'dicom_index')
         else:
             # Chunked: process and save in chunks
@@ -366,6 +487,7 @@ class DicomIndexer():
                     metadata.append(self.dcm_to_tags(dicom_file))
                 
                 dicom_index = pd.DataFrame(metadata)
+                self.update_seen_columns(dicom_index.columns, context=f"chunk {chunk}")
                 self.save_tables(dicom_index, self.output_dir / f'dicom_index_chunk{chunk:0{self.chunk_width}}')
                 
                 toc_chunk = timeit.default_timer()
@@ -512,8 +634,14 @@ if __name__ == "__main__":
         action="store_true",
         help="If set, overwrite existing output files/chunks in output_dir."
         )
+    parser.add_argument(
+        "--max_columns",
+        type=int,
+        default=DEFAULT_MAX_COLUMNS,
+        help="Maximum number of columns allowed in output tables after flattening DICOM metadata."
+        )
     args = parser.parse_args()
 
-    indexer = DicomIndexer(level=args.level, input_dir=args.input_dir, output_dir=args.output_dir, chunk_size=args.chunk_size, dicom_attributes=args.attributes, overwrite=args.overwrite)
+    indexer = DicomIndexer(level=args.level, input_dir=args.input_dir, output_dir=args.output_dir, chunk_size=args.chunk_size, dicom_attributes=args.attributes, overwrite=args.overwrite, max_columns=args.max_columns)
     indexer.prepare_run()
     indexer.run()
