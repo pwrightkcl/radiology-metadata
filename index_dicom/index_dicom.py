@@ -206,10 +206,8 @@ class DicomIndexer():
                 missing_chunks.append(chunk)
         
         dicom_index = pd.concat(df_list, ignore_index=True)
-        self.validate_column_limit(dicom_index, context="concatenated chunks")
-        # Will need save_tables method - placeholder for now
-        # save_tables(dicom_index, self.output_dir / 'dicom_index')
-        
+        self.validate_column_limit(dicom_index, context="concatenating chunks")
+        self.save_tables(dicom_index, self.output_dir / 'dicom_index')
         toc = timeit.default_timer()
         print(f"Concatenated {self.n_chunk - len(missing_chunks)} chunks in {toc - tic:.1f} seconds.")
         if len(missing_chunks) > 0:
@@ -469,7 +467,7 @@ class DicomIndexer():
             print(f"Indexed {self.n_dcm} DICOM files in {(toc - tic):.0f} seconds.")
             
             dicom_index = pd.DataFrame(metadata)
-            self.validate_column_limit(dicom_index, context="non-chunked index")
+            self.validate_column_limit(dicom_index, context="creating index")
             self.save_tables(dicom_index, self.output_dir / 'dicom_index')
         else:
             # Chunked: process and save in chunks
@@ -487,7 +485,7 @@ class DicomIndexer():
                     metadata.append(self.dcm_to_tags(dicom_file))
                 
                 dicom_index = pd.DataFrame(metadata)
-                self.update_seen_columns(dicom_index.columns, context=f"chunk {chunk}")
+                self.update_seen_columns(dicom_index.columns, context=f"creating index chunk {chunk}")
                 self.save_tables(dicom_index, self.output_dir / f'dicom_index_chunk{chunk:0{self.chunk_width}}')
                 
                 toc_chunk = timeit.default_timer()
