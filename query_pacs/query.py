@@ -15,9 +15,9 @@ import copy
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tqdm import tqdm
 import pandas as pd
+from pandas.api.types import is_list_like
 from pydicom import dcmread, Dataset, DataElement
 from pydicom.datadict import dictionary_VM, dictionary_has_tag
-from pydicom.multival import MultiValue
 from pydicom.valuerep import DSfloat, IS, PersonName
 from pydicom.uid import UID
 from pynetdicom import AE
@@ -476,7 +476,7 @@ def dataset_to_dict(ds: Dataset, prefix: str = "") -> dict:
     return dicom_dict
 
 
-def _normalise_vr(el: DataElement) -> Union[str, list, int, float, None]:
+def _normalise_vr(el: DataElement) -> Any:
     """Normalise a DICOM element's value according to its value representation (VR) and value multiplicity (VM).
 
     Prevent pyarrow errors when saving the dataframe to parquet. Pyarrow does not
@@ -511,50 +511,37 @@ def _normalise_vr(el: DataElement) -> Union[str, list, int, float, None]:
     my_null = "" if vr in STRING_VRS else None
 
     # Get VM from dictionary if known
-    vm = None
     if dictionary_has_tag(tag):
         vm = dictionary_VM(tag)  # e.g., "1", "1-n", "2", "2-n"
+    else:
+        return value
 
-    if isinstance(value, MultiValue):
-        # Convert pydicom MultiValue to list
-        value = list(value)
-    elif value == "" or value is None or pd.isna(value):
-        # Handle singletons with empty or missing values
+    if is_list_like(value) and not isinstance(value, (str, bytes, bytearray)):
         if vm == "1":
-            return my_null
-        else:
-            # VM > 1 → missing/multi-value becomes empty list
-            return []
+            # VM = 1 and value is list-like (rare): flatten or coerce
+            if len(value) == 0:
+                return my_null
+            if len(value) == 1:
+                if value[0] == "" or value[0] is None or pd.isna(value[0]):
+                    return my_null
+                return value[0]
+            return str(value)
+        return list(value)
 
-    # Check Value Multiplicity and object being list type are consistent
-    if vm != "1" and not isinstance(value, list):
-        # VM > 1 so convert to a list
+    # Scalar value path
+    if vm != "1":
+        # VM > 1 so convert scalar to list
+        if value == "" or value is None or pd.isna(value):
+            return []
         if isinstance(value, str):
             if '/' in value:
                 return value.split('/')
-            elif '\\' in value:
+            if '\\' in value:
                 return value.split('\\')
-            else:
-                return [value]
-        else:
             return [value]
-    elif vm == "1" and isinstance(value, list):
-        # VM = 1 and value is a list (rare): flatten
-        if len(value) == 0:
-            return my_null
-        if len(value) == 1:
-            if value[0] == "" or value[0] is None or pd.isna(value[0]):
-                return my_null
-            else:
-                return value[0]
-        else:
-            """This element is invalid and there is not a straightforward way to coerce it to a usable value.
-            For now, store as string, which will work for text elements. For numeric elements, this will raise 
-            a pyarrow exception from mixing str and float, causing the dataset to be saved as pickle instead
-            of parquet downstream, with a warning. If this occurs a lot, we should review the data to see which
-            attributes are affected and work out a better fix.
-            """
-            return str(value)
+        return [value]
+    if value == "" or value is None or pd.isna(value):
+        return my_null
 
     # Value is already normal. Return unchanged.
     return value
@@ -571,27 +558,26 @@ def _convert_value(v: Any) -> Any:
     Returns:
         Converted value.
     """
-    t = type(v)
-    if t is list:
+    if is_list_like(v) and not isinstance(v, (str, bytes, bytearray)):
         return [_convert_value(mv) for mv in v]
-    elif pd.isna(v):
+    if pd.isna(v):
         return None
-    elif t in (int, float):
-        return v
-    elif t is DSfloat:
+    if type(v) is DSfloat:
         return float(v) if str(v) != "" else None
-    elif t is IS:
+    if type(v) is IS:
         return int(v) if str(v) != "" else None
-    elif t in (str, PersonName, UID):
+    if type(v) in (int, float):
+        return v
+    if type(v) in (str, PersonName, UID):
         cv = _sanitise_unicode(str(v))
         if len(cv) > 256:
             cv = cv[:253] + '...'
         return cv
-    elif t is bytes:
-        s = v.decode('ascii', 'replace')
-        return _sanitise_unicode(s)
-    else:
-        return repr(v)
+    if type(v) is bytes:
+        return _sanitise_unicode(v.decode('ascii', 'replace'))
+    if type(v) is bytearray:
+        return _sanitise_unicode(v.decode('ascii', 'replace'))
+    return repr(v)
 
 
 def _sanitise_unicode(s: str) -> str:

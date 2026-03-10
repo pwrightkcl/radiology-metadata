@@ -9,17 +9,16 @@ import argparse
 import os
 from pathlib import Path
 import csv
-from math import floor, ceil
-import gc
+from math import ceil
 from datetime import timedelta
 import warnings
 from typing import Any
 
 import pandas as pd
+from pandas.api.types import is_list_like
 from pydicom import dcmread, Dataset, DataElement
 from pydicom.errors import InvalidDicomError
 from pydicom.datadict import dictionary_VR, dictionary_VM, dictionary_has_tag
-from pydicom.multival import MultiValue
 from pydicom.uid import UID
 from pydicom.valuerep import DSfloat, IS, PersonName
 import timeit
@@ -269,7 +268,10 @@ class DicomIndexer():
         """
         dicom_dict: dict[str, Any] = {}
         warning_clips: list[str] = []
-        keys = keywords if keywords != ["*"] else [k for k in ds.keys() if k != (0x7FE0, 0x0010)]
+        if keywords != ["*"]:
+            keys: list[Any] = list(keywords)
+        else:
+            keys = [k for k in ds.keys() if k != (0x7FE0, 0x0010)]
 
         for key in keys:
             field_name = str(key)
@@ -309,7 +311,7 @@ class DicomIndexer():
 
         return dicom_dict, warning_clips
 
-    def _normalise_vr(self, el: DataElement) -> str | list | int | float | None:
+    def _normalise_vr(self, el: DataElement):
         """Normalise DataElement values by VR/VM to stabilise downstream table typing."""
         value = el.value
         vr = el.VR
@@ -317,76 +319,79 @@ class DicomIndexer():
 
         my_null = "" if vr in STRING_VRS else None
 
-        vm = None
         if dictionary_has_tag(tag):
             vm = dictionary_VM(tag)
+        else:
+            # Cannot continue with tests if dictionary VM is unknown
+            return value
 
-        if isinstance(value, MultiValue):
-            value = list(value)
-        elif self._is_nullish(value):
+        if is_list_like(value) and not isinstance(value, (str, bytes, bytearray)):
             if vm == "1":
-                return my_null
-            return []
-
-        if vm != "1" and not isinstance(value, list):
-            if isinstance(value, str):
-                if '/' in value:
-                    return value.split('/')
-                if '\\' in value:
-                    return value.split('\\')
-                return [value]
-            return [value]
-        if vm == "1" and isinstance(value, list):
-            if len(value) == 0:
-                return my_null
-            if len(value) == 1:
-                if self._is_nullish(value[0]):
+                # Value should not be list-like. Try to correct.
+                if len(value) == 0:
                     return my_null
-                return value[0]
-            return str(value)
-
-        return value
+                elif len(value) == 1:
+                    if value[0] == "" or value[0] is None or pd.isna(value[0]):
+                        return my_null
+                    return value[0]
+                else:
+                    # Value has multiple elements. Convert to str.
+                    # This works if VR is a string type. If VR is numeric, there is no good fix.
+                    # Keeping as str at least allows later introspection of the data irregularity.
+                    warnings.warn(
+                        f"Tag {el.keyword!r} (VR={vr}, VM={vm}) has {len(value)} elements "
+                        f"but VM=1 was expected; coercing to str: {value!r}",
+                        stacklevel=3,
+                    )
+                    return str(value)
+            else:
+                # Convert pydicom MultiArray etc. to list
+                return list(value)
+        else:
+            # This value is scalar
+            if vm != "1":
+                # Value should be list-like. Try to correct.
+                if value == "" or value is None or pd.isna(value):
+                    return []
+                elif isinstance(value, str):
+                    if '\\' in value:
+                        return value.split('\\')
+                    elif '/' in value:
+                        return value.split('/')
+                    else:
+                        return [value]
+                else:
+                    return [value]
+            elif value == "" or value is None or pd.isna(value):
+                return my_null
+            else:
+                return value
 
     def _convert_value(self, v: Any) -> Any:
         """Convert pydicom value to a serializable value."""
-        t = type(v)
-        if t is list:
+        if is_list_like(v) and not isinstance(v, (str, bytes, bytearray)):
+            # All list-like values should already by converted to list, but use broad check to be defensive.
             return [self._convert_value(mv) for mv in v]
-        if self._is_nullish(v):
+        if pd.isna(v):
             return None
-        if t in (int, float):
-            return v
-        if t is DSfloat:
+        if type(v) is DSfloat:
             return float(v) if str(v) != "" else None
-        if t is IS:
+        if type(v) is IS:
             return int(v) if str(v) != "" else None
-        if t in (str, PersonName, UID):
+        if type(v) in (int, float):
+            return v
+        if type(v) in (str, PersonName, UID):
             cv = self._sanitise_unicode(str(v))
             if len(cv) > 256:
                 cv = cv[:253] + '...'
             return cv
-        if t is bytes:
+        if type(v) is bytes:
+            s = v.decode('ascii', 'replace')
+            return self._sanitise_unicode(s)
+        if type(v) is bytearray:
             s = v.decode('ascii', 'replace')
             return self._sanitise_unicode(s)
         return repr(v)
-
-    @staticmethod
-    def _is_nullish(v: Any) -> bool:
-        """Return True only for scalar null-like values; avoid ambiguous array truth checks."""
-        if v is None:
-            return True
-        if isinstance(v, str):
-            return v == ""
-
-        try:
-            na_value = pd.isna(v)
-        except Exception:
-            return False
-
-        try:
-            return bool(na_value)
-        except (ValueError, TypeError):
-            return False
 
     @staticmethod
     def _sanitise_unicode(s: str) -> str:
