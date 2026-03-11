@@ -45,14 +45,46 @@ class ColumnLimitExceededError(ValueError):
     """Raised when flattened metadata exceeds configured DataFrame column limit."""
 
 class DicomIndexer():
-    # level: str
-    # input_dir: str | Path
-    # output_dir: str | Path
-    # chunk_size: int | None = None
-    # dicom_attributes: list | None = None
+    """Extracts metadata from DICOM files and saves the result as CSV and parquet.
 
-    # Initialise by checking the variables are valid
+    Attributes:
+        level (str): Extraction level; ``'file'`` for individual files, ``'dir'`` for first file per directory.
+        input_dir (Path): Root of directory tree containing DICOM files.
+        output_dir (Path): Directory to save output files.
+        chunk_size (int | None): Number of files to process per chunk, or ``None`` for no chunking.
+        dicom_attributes (list | None): DICOM attribute keywords to extract. May be a list of keywords,
+            a single-element list containing ``'*'`` (all attributes), a single-element list with a path
+            to a text file of keywords, or ``None`` to use the default attribute set for the chosen level.
+        overwrite (bool): Whether to overwrite existing output files.
+        max_columns (int): Maximum number of columns allowed in output tables after flattening DICOM metadata.
+        seen_columns (set[str]): Running union of column names encountered across all processed files.
+        chunked (bool): Whether the run will process files in chunks.
+        attribute_list (list[str]): Resolved list of DICOM attribute keywords to extract.
+    """
+
     def __init__(self, level: str, input_dir: str | Path, output_dir: str | Path, chunk_size: int | None = None, dicom_attributes: list | None = None, overwrite: bool = False, max_columns: int = DEFAULT_MAX_COLUMNS):
+        """Initialise DicomIndexer and validate all configuration parameters.
+
+        Args:
+            level (str): Extraction level; ``'file'`` for individual files, ``'dir'`` for first file per directory.
+            input_dir (str | Path): Root of directory tree containing DICOM files.
+            output_dir (str | Path): Directory to save output files; created if it does not exist.
+            chunk_size (int | None): Number of files to process before saving an intermediate chunk.
+                ``None`` disables chunking.
+            dicom_attributes (list | None): DICOM attribute keywords to extract. May be a list of keywords,
+                a single-element list containing ``'*'`` (all attributes), a single-element list with a path
+                to a text file of keywords, or ``None`` to use the default attribute set for the chosen level.
+            overwrite (bool): If ``True``, existing output files will be deleted before processing.
+            max_columns (int): Maximum number of columns permitted in output tables after flattening DICOM metadata.
+
+        Raises:
+            ValueError:
+                - ``level`` is not ``'file'`` or ``'dir'``,
+                - ``input_dir`` does not exist,
+                - ``chunk_size`` is not a positive integer,
+                - any DICOM attribute keyword is invalid, or
+                - ``max_columns`` is not a positive integer.
+        """
         self.level = level.lower()
         self.input_dir = Path(input_dir).resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -134,16 +166,14 @@ class DicomIndexer():
         """List DICOM ``.dcm`` files recursively and cache the result.
 
         Uses ``os.walk(..., followlinks=True)`` so symlinked directories are traversed.
+        Assumes that for ``level='dir'``, one directory corresponds to one DICOM series;
+        in this mode, only the first ``.dcm`` file found in each directory is listed.
 
-        Assumption for ``level='dir'``:
-            one directory corresponds to one DICOM series; in this mode, only the first
-            ``.dcm`` file found in each directory is listed.
-
-        Parameters:
-            refresh: If True, ignore any existing cached list and rescan.
+        Args:
+            refresh (bool): If ``True``, ignore any existing cached list and rescan.
 
         Returns:
-            List of DICOM file paths.
+            list[Path]: List of DICOM file paths.
         """
         list_file = self.output_dir / (
             "dicom_dir_first_file_list.txt" if self.level == "dir" else "dicom_file_list.txt"
@@ -181,10 +211,12 @@ class DicomIndexer():
         return dcm_files
 
     def concatenate_chunks(self) -> None:
-        """Concatenate saved chunk files into final output.
-        
-        Reads chunk*.parquet or chunk*.pickle files and combines them into
-        dicom_index.csv, dicom_index.parquet, and dicom_index.pickle.
+        """Concatenate saved chunk files into final output files.
+
+        Reads ``dicom_index_chunk*.parquet`` or ``dicom_index_chunk*.pickle`` files from
+        ``output_dir`` and concatenates them into ``dicom_index.csv`` and ``dicom_index.parquet``
+        (or ``dicom_index.pickle`` if parquet serialisation fails).
+        Warns if any expected chunk files are missing from the sequence.
         """
         print("Concatenating chunks.")
         tic = timeit.default_timer()
@@ -215,15 +247,16 @@ class DicomIndexer():
 
     def dcm_to_tags(self, dicom_file: Path) -> dict:
         """Read a DICOM file and return a dictionary of DICOM attributes.
-        
-        Adds meta-attributes for filepath, warnings and errors.
-        Will read only specified attributes if keywords provided, otherwise reads all.
 
-        Parameters:
-            dicom_file: Path to DICOM file.
+        Adds the meta-attributes ``dicom_filepath``, ``warnings``, and ``error``.
+        Reads only the attributes in ``self.attribute_list``, or all attributes if it is ``['*']``.
+
+        Args:
+            dicom_file (Path): Path to the DICOM file to read.
 
         Returns:
-            Dictionary of DICOM attributes.
+            dict: Dictionary of DICOM attribute values keyed by keyword name. Always includes
+                ``dicom_filepath``, ``warnings``, and ``error`` keys.
         """
         this_data = {
             'dicom_filepath': str(dicom_file),
@@ -264,7 +297,16 @@ class DicomIndexer():
     def dataset_to_attributes(self, ds: Dataset, keywords: list[str], prefix: str = "") -> tuple[dict, list[str]]:
         """Extract DICOM elements from a Dataset, flattening sequences recursively.
 
-        If ``keywords`` is ["*"], all top-level elements except PixelData are included.
+        If ``keywords`` is ``['*']``, all top-level elements except PixelData are extracted.
+        Recursively flattens sequence (SQ) elements with dot-notation keys, e.g. ``SequenceKeyword.0.ElementKeyword``.
+
+        Args:
+            ds (Dataset): pydicom Dataset to extract attributes from.
+            keywords (list[str]): List of DICOM keyword strings to extract, or ``['*']`` for all.
+            prefix (str): Key prefix prepended to all output keys; used for recursive sequence flattening.
+
+        Returns:
+            tuple[dict, list[str]]: A tuple of (attribute dict, list of warning strings).
         """
         dicom_dict: dict[str, Any] = {}
         warning_clips: list[str] = []
@@ -312,7 +354,22 @@ class DicomIndexer():
         return dicom_dict, warning_clips
 
     def _normalise_vr(self, el: DataElement):
-        """Normalise DataElement values by VR/VM to stabilise downstream table typing."""
+        """Normalise a DataElement value by VR and VM to stabilise downstream table typing.
+
+        Ensures attributes with VM of 1 are scalar and multi-value VMs are lists (not pydicom MultiValue, 
+        which pyarrow does not recognise). Attempts to split scalar strings for non-scale VMs on 
+        commonly-used delimiters ``/`` and ``\\``. Ensures null values are consistent with VR, using
+        ``""`` for string scalar, ``None`` for other scalar, and ``[]`` for empty multi-value.
+
+        The aim of this normalisation is to prevent pyarrow exceptions caused by inconsistent typing
+        within columns, while minimising and modification of data.
+
+        Args:
+            el (DataElement): pydicom DataElement to normalise.
+
+        Returns:
+            Normalised value; type depends on the VR and VM of the element.
+        """
         value = el.value
         vr = el.VR
         tag = el.tag
@@ -368,7 +425,18 @@ class DicomIndexer():
                 return value
 
     def _convert_value(self, v: Any) -> Any:
-        """Convert pydicom value to a serializable value."""
+        """Convert a pydicom value to a JSON-serialisable Python type.
+
+        Recursively converts list elements. Converts ``DSfloat`` to ``float``, ``IS`` to ``int``,
+        ``PersonName`` and ``UID`` to ``str``, and byte sequences to ASCII strings.
+        String values longer than 256 characters are truncated.
+
+        Args:
+            v (Any): Value to convert; may be a scalar or a list.
+
+        Returns:
+            Any: Converted value as a plain Python type, or ``None`` for null-like inputs.
+        """
         if is_list_like(v) and not isinstance(v, (str, bytes, bytearray)):
             # All list-like values should already by converted to list, but use broad check to be defensive.
             return [self._convert_value(mv) for mv in v]
@@ -395,10 +463,26 @@ class DicomIndexer():
 
     @staticmethod
     def _sanitise_unicode(s: str) -> str:
+        """Remove null characters and strip surrounding whitespace from a string.
+
+        Args:
+            s (str): String to sanitise.
+
+        Returns:
+            str: Sanitised string.
+        """
         return s.replace(u"\u0000", "").strip()
 
     def validate_column_limit(self, dicom_index: pd.DataFrame, context: str = "") -> None:
-        """Raise if output table width exceeds configured max_columns."""
+        """Raise if the output table width exceeds the configured ``max_columns`` limit.
+
+        Args:
+            dicom_index (pd.DataFrame): DataFrame to validate.
+            context (str): Optional description of the operation, included in the error message.
+
+        Raises:
+            ColumnLimitExceededError: If the number of columns in ``dicom_index`` exceeds ``self.max_columns``.
+        """
         n_cols = len(dicom_index.columns)
         if n_cols > self.max_columns:
             context_msg = f" while {context}" if context else ""
@@ -406,11 +490,22 @@ class DicomIndexer():
                 f"Column limit exceeded{context_msg}: {n_cols} columns generated, "
                 f"but max_columns is set to {self.max_columns}. "
                 "This is usually caused by flattening nested DICOM sequences; reduce selected attributes "
-                "or reduce sequence complexity."
+                "or increase max_columns."
             )
 
     def update_seen_columns(self, columns: Any, context: str = "") -> None:
-        """Track global union of seen columns and enforce max_columns early."""
+        """Add column names to the running set of seen columns and enforce the ``max_columns`` limit.
+
+        Called incrementally during processing to catch column limit violations early,
+        before combining records into a DataFrame.
+
+        Args:
+            columns (Any): Iterable of column names to add to the seen set.
+            context (str): Optional description of the operation, included in the error message.
+
+        Raises:
+            ColumnLimitExceededError: If the total number of unique columns seen so far exceeds ``self.max_columns``.
+        """
         self.seen_columns.update(str(c) for c in columns)
         n_cols = len(self.seen_columns)
         if n_cols > self.max_columns:
@@ -420,14 +515,18 @@ class DicomIndexer():
                 f"but max_columns is set to {self.max_columns}."
             )
 
-    def save_tables(self, dicom_index, file_stem: Path) -> None:
-        """Save the DICOM index as CSV and parquet file.
-        
-        If there is an error saving to parquet, save as pickle and write an error file.
+    def save_tables(self, dicom_index: pd.DataFrame, file_stem: Path) -> None:
+        """Save the DICOM index as CSV and parquet.
 
-        Parameters:
-            dicom_index: DataFrame containing the DICOM index.
-            file_stem: Path to the output file stem.
+        Always writes a CSV file. Attempts to write parquet; if serialisation fails, writes a
+        pickle instead and records the error in a ``.parquet.error`` file.
+
+        Args:
+            dicom_index (pd.DataFrame): DataFrame containing the DICOM index.
+            file_stem (Path): Path stem for output files (suffix will be added by this method).
+
+        Raises:
+            ColumnLimitExceededError: If the number of columns exceeds ``self.max_columns``.
         """
         self.validate_column_limit(dicom_index, context=f"saving {file_stem.name}")
         dicom_index.to_csv(file_stem.with_suffix('.csv'), index=False, quoting=csv.QUOTE_NONNUMERIC)
@@ -475,8 +574,14 @@ class DicomIndexer():
 
     def run(self) -> None:
         """Execute the DICOM indexing workflow.
-        
-        Processes files in chunks if configured, otherwise processes all at once.
+
+        Processes files in chunks (saving intermediate ``dicom_index_chunk*`` files) if
+        ``self.chunked`` is ``True``, otherwise processes all files in a single pass.
+        Resumes from ``self.chunks_saved`` if a partial chunked run was detected by ``prepare_run``.
+        Concatenates chunks via ``concatenate_chunks`` and saves final output via ``save_tables``.
+
+        Raises:
+            ColumnLimitExceededError: If the number of output columns exceeds ``self.max_columns``.
         """
         tic_total = timeit.default_timer()
         
@@ -524,14 +629,27 @@ class DicomIndexer():
         print(f"Total time: {total_delta}")
 
     def prepare_run(self, refresh_file_list: bool | None = None) -> None:
-        """Prepare file list, output safety checks, and chunk metadata."""
+        """Prepare the file list, validate output directory state, and set chunk metadata.
+
+        Lists DICOM files, determines the number of chunks, and checks for existing output.
+        May exit early with ``SystemExit(0)`` if all work is already done. Partial chunked runs
+        will be resumed by ``run``.
+
+        Args:
+            refresh_file_list (bool | None): If ``True``, re-scan input directory even if a cached
+                file list exists. Defaults to ``self.overwrite``.
+
+        Raises:
+            FileNotFoundError: If no ``.dcm`` files are found under ``input_dir``, or if chunk files are present but the sequence has gaps.
+            FileExistsError: If the number of existing chunk files exceeds the expected count.
+        """
         if refresh_file_list is None:
             refresh_file_list = self.overwrite
 
         self.dcm_files = self.list_dcm_files(refresh=refresh_file_list)
         self.n_dcm = len(self.dcm_files)
         if self.n_dcm == 0:
-            raise ValueError(f"No .dcm files found under {self.input_dir}.")
+            raise FileNotFoundError(f"No .dcm files found under {self.input_dir}.")
 
         self.count_width = len(str(self.n_dcm))
 
