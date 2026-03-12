@@ -134,7 +134,7 @@ class DicomIndexer():
             if dictionary_has_tag(self.dicom_attributes[0]):
                 self.attribute_list = self.dicom_attributes
             elif self.dicom_attributes[0] == "*":
-                print("Extracting all DICOM attributes. Warning: this is intended for DICOM query results with a limited number of attributes, not image files, which will produce a very large output.")
+                print("Extracting all DICOM attributes. NOTE: this is intended for DICOM query results with a limited number of attributes, not image files, which will produce a very large output.")
                 self.attribute_list = self.dicom_attributes
             else:
                 # If the single attribute is not "*" and is not a valid DICOM keyword, check if it's a file containing keywords
@@ -242,7 +242,7 @@ class DicomIndexer():
         toc = timeit.default_timer()
         print(f"Concatenated {self.n_chunk - len(missing_chunks)} chunks in {toc - tic:.1f} seconds.")
         if len(missing_chunks) > 0:
-            print("Warning: Could not find every chunk. Concatenated index saved without these chunks:")
+            print("NOTE: Could not find every chunk. Concatenated index saved without these chunks:")
             print(missing_chunks)
 
     def dcm_to_tags(self, dicom_file: Path) -> dict:
@@ -735,9 +735,10 @@ class DicomIndexer():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Extract metadata from DICOM files to CSV / parquet / pickle.",
-        epilog="Warning: setting attributes to '*' will retrieve all attributes; "\
+        epilog="NOTE: setting attributes to '*' will retrieve all attributes; "\
                "it is intended for DICOM query results with a limited number of attributes, "\
-               "not image files, which will produce a very large output.")
+               "not image files, which may produce thousands of columns after flattening "
+               "sequence attributes.")
     parser.add_argument(
         "--level",
         type=str,
@@ -765,7 +766,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--attributes",
         nargs="*",
-        help="DICOM attributes to extract (text file, one or more DICOM keywords, or '*'; default is a small set of basic attributes)."
+        help="DICOM attributes to extract (one or more DICOM keywords, path to text file containing DICOM keywords, or '*'; default is a small set of basic attributes)."
         )
     parser.add_argument(
         "--overwrite",
