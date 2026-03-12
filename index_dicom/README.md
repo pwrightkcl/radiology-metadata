@@ -28,6 +28,42 @@ Outputs:
 * `dicom_index.csv`
 * `dicom_index.parquet` (or `.pkl` if parquet fails)
 
+### Output data structure
+
+The output table will always include the initial columns:
+
+* `dicom_filepath`: the full path of the file being indexed
+* `warnings`: any warnings that occurred during indexing, concatenated
+* `error`: if indexing fails, the error message will be stored here
+
+The remaining columns will use the DICOM keyword of the indexed attribute, or a hex string for private attributes.
+
+DICOM Sequence attributes will be flattened for storage in DataFrame format using dot indexing.
+
+For example:
+
+```text
+OtherPatientIDsSequence
+├── 0
+│   ├── PatientID
+│   ├── IssuerOfPatientID
+│   └── TypeOfPatientID
+└── 1
+    ├── PatientID
+    ├── IssuerOfPatientID
+    └── TypeOfPatientID  
+```
+
+Becomes:
+
+```text
+OtherPatientIDsSequence.0.PatientID
+...
+OtherPatientIDsSequence.1.TypeOfPatientID
+```
+
+Flattening nested sequence attributes can produce very wide tables, especially with `--attributes "*"`. To bound peak memory usage and reduce the risk of out-of-memory failures and slow serialisation, the script enforces a default column limit of 256 (configurable via `--max_columns`). The `"*"` option is only recommended when indexing DICOM files representing C-FIND query responses, since these are constrained to the attributes specified in the initial query. If used on image files, this option may result in thousands of columns.
+
 ### Chunking and resuming
 
 Setting a chunk size will make the script save the indexed data to parquet each time the chunk size is reached. This prevents the dataset from growing too large in memory and slowing the indexing process and it allows resuming if the script is interrupted.
@@ -41,7 +77,7 @@ If `--overwrite` is not set, the script will check for existing files and attemp
 * If indexing in a single pass and the output files exist, exit with a "nothing to do" message.
 * If indexing by chunk:
   * If all chunks are present:
-    * If final outputs are present, exit with a "nothing to do message".
+    * If final outputs are present, exit with a "nothing to do" message.
     * Otherwise, concatenate the chunks, save the final outputs, and finish.
   * If a partial set of chunks are present:
     * Resume from the next chunk
@@ -81,31 +117,3 @@ Values are converted to Python serialisable types:
 * `IS` -> `int`
 * `bytes` and `bytearray` -> `str`
 * String values have Unicode null characters and surrounding whitespace removed
-
-### Sequence flattening and column limits
-
-DICOM Sequence attributes are flattened for storage in DataFrame format using dot indexing.
-
-For example:
-
-```text
-OtherPatientIDsSequence
-├── 0
-│   ├── PatientID
-│   ├── IssuerOfPatientID
-│   └── TypeOfPatientID
-└── 1
-    ├── PatientID
-    ├── IssuerOfPatientID
-    └── TypeOfPatientID  
-```
-
-Becomes:
-
-```text
-OtherPatientIDsSequence.0.PatientID
-...
-OtherPatientIDsSequence.1.TypeOfPatientID
-```
-
-If indexing all attributes using `--attributes "*"`, the number of columns can grow very large. The maximum number of columns is limited to 256 by default. The `"*"` option is only recommended when indexing DICOM files representing C-FIND query responses, since these are constrained by the attributes specified in the initial query. For image files, flattening all attributes could result in thousands of columns. Use `--max_columns` to adjust the limit if needed.
