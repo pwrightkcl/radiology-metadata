@@ -43,28 +43,27 @@ echo "#dcm2niix commands" > "$commands"
 for study_dir in "${dicom_root}"/*
 do
   study=$(basename "$study_dir")
-  echo -n "$study "
   if [ ! -d "$study_dir" ]; then
-    echo "is not a directory, skipping."
+    echo "$study is not a directory, skipping."
     continue
   fi
   for series_dir in "${study_dir}"/*
   do
     series=$(basename "${series_dir}")
-    echo -n "$series "
+    echo -n "Study $study, Series $series: "
     if [ ! -d "$series_dir" ]; then
-      echo "is not a directory, skipping."
+      echo "is not a directory; skipping."
       continue
     fi
     if [[ -z "$(find -L "$series_dir" -maxdepth 1 -type f -iname "*.dcm" -print -quit)" ]];
     then
-      echo "contains no .dcm files, skipping."
+      echo "contains no .dcm files; skipping."
       continue
     fi
     nifti_dir=${nifti_root}/${study}/${series}
     if [ -d "$nifti_dir" ]
     then
-      echo "EXISTS"
+      echo "already exists; skipping."
     else
       echo -n "mkdir -p $nifti_dir && " >> "$commands"
       echo "dcm2niix -o $nifti_dir -f ses-${study}_run-${series}_%d -z y $series_dir" >> "$commands"
