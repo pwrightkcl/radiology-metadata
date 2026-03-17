@@ -56,7 +56,7 @@ do
       echo "is not a directory, skipping."
       continue
     fi
-    if [[ -z "$(find "$series_dir" -maxdepth 1 -type f -iname "*.dcm" -print -quit)" ]];
+    if [[ -z "$(find -L "$series_dir" -maxdepth 1 -type f -iname "*.dcm" -print -quit)" ]];
     then
       echo "contains no .dcm files, skipping."
       continue
