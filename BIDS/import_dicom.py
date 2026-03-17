@@ -83,7 +83,7 @@ def main (project_dir: Path):
         warnings.warn("Duplicate `ln` commands generated. Does you DICOM index contain multiple series per directory?")
 
     # Write commands to file.
-    code_dir = project_dir / 'code' / 'sourcedata'
+    code_dir = project_dir / 'code' / 'sourcedata' / 'generated_scripts'
     if not code_dir.exists():
         code_dir.mkdir(parents=True)
     import_commands = code_dir / 'import_commands.sh'

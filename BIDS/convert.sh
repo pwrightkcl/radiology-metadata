@@ -33,7 +33,7 @@ if [ ! -d "$nifti_root" ]; then
     echo "NIfTI root directory not found, creating: $nifti_root"
     mkdir -p "$nifti_root"
 fi
-commands_dir="${project_dir}"/code/sourcedata/generated_commands
+commands_dir="${project_dir}"/code/sourcedata/generated_scripts
 if [ ! -d "$commands_dir" ]; then
     echo "Generated scripts directory not found, creating: $commands_dir"
     mkdir -p "$commands_dir"
@@ -42,21 +42,25 @@ commands="${commands_dir}"/convert_commands.sh
 echo "#dcm2niix commands" > "$commands"
 for study_dir in "${dicom_root}"/*
 do
+  study=$(basename "$study_dir")
+  echo -n "$study "
   if [ ! -d "$study_dir" ]; then
+    echo "is not a directory, skipping."
     continue
   fi
-  study=$(basename "$study_dir")
   for series_dir in "${study_dir}"/*
   do
+    series=$(basename "${series_dir}")
+    echo -n "$series "
     if [ ! -d "$series_dir" ]; then
+      echo "is not a directory, skipping."
       continue
     fi
     if [[ -z "$(find "$series_dir" -maxdepth 1 -type f -iname "*.dcm" -print -quit)" ]];
     then
+      echo "contains no .dcm files, skipping."
       continue
     fi
-    series=$(basename "${series_dir}")
-    echo -n "$study $series "
     nifti_dir=${nifti_root}/${study}/${series}
     if [ -d "$nifti_dir" ]
     then
