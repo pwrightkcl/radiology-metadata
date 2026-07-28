@@ -117,3 +117,10 @@ Values are converted to Python serialisable types:
 * `IS` -> `int`
 * `bytes` and `bytearray` -> `str`
 * String values have Unicode null characters and surrounding whitespace removed
+
+## Insight46 scripts
+
+Several scripts were added for quick-and-dirty DICOM indexing specific to the file organisation for Insight46.
+
+* `get_study_info.py` `get_series_info.py`: get a fixed set of attributes assuming organisation by date, study UID, and series UID
+* `fix_project.py`: adds the project name "1946" to ReferringPhysicianName, which is where the XNAT import script expects the project name.
