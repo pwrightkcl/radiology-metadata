@@ -35,7 +35,7 @@ def main(input_dir: str):
     Outputs:
         series_info_{timestamp}.csv: CSV file containing series information.
     """
-    print(f"Extracting study info from {input_dir}")
+    print(f"Extracting series info from {input_dir}")
     input_path = Path(input_dir)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     temp_csv = input_path / f"series_info_long_{timestamp}.csv"
@@ -80,7 +80,7 @@ def main(input_dir: str):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Get DICOM study information.")
+    parser = argparse.ArgumentParser(description="Get DICOM series information.")
     parser.add_argument(
         '--input_dir',
         required=True,
